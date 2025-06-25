@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Union
+from typing import Dict, Union, List
 
 import numpy as np
 import PIL
@@ -41,6 +41,14 @@ class Detector:
         results: Results = self.yolo.predict(image, **self.detector_kwargs)[0]
         return PersonAndFaceResult(results)
 
+    def predict_batched(self, images: List[Union[np.ndarray, str, "PIL.Image"]]) -> List[PersonAndFaceResult]:
+        results_list: List[Results] = self.yolo.predict(images, **self.detector_kwargs)
+        return [PersonAndFaceResult(results) for results in results_list]
+
     def track(self, image: Union[np.ndarray, str, "PIL.Image"]) -> PersonAndFaceResult:
         results: Results = self.yolo.track(image, persist=True, **self.detector_kwargs)[0]
         return PersonAndFaceResult(results)
+
+    def track_batched(self, images: List[Union[np.ndarray, str, "PIL.Image"]]) -> List[PersonAndFaceResult]:
+        results_list: List[Results] = self.yolo.track(images, persist=True, **self.detector_kwargs)
+        return [PersonAndFaceResult(results) for results in results_list]

@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, List
 
 import numpy as np
 import torch
@@ -171,6 +171,62 @@ class MiVOLO:
 
         # write gender and age results into detected_bboxes
         self.fill_in_results(output, detected_bboxes, faces_inds, bodies_inds)
+
+    def predict_batched(self, images: List[np.ndarray], detected_bboxes_list: List[PersonAndFaceResult]):
+        all_faces_input = []
+        all_person_input = []
+        outputs_info = []
+
+        for i, (image, detected_bboxes) in enumerate(zip(images, detected_bboxes_list)):
+            if (
+                (detected_bboxes.n_objects == 0)
+                or (not self.meta.use_persons and detected_bboxes.n_faces == 0)
+                or (self.meta.disable_faces and detected_bboxes.n_persons == 0)
+            ):
+                outputs_info.append(None)
+                continue
+
+            faces_input, person_input, faces_inds, bodies_inds = self.prepare_crops(image, detected_bboxes)
+
+            if faces_input is None and person_input is None:
+                outputs_info.append(None)
+                continue
+            
+            num_preds = 0
+            if faces_input is not None:
+                all_faces_input.append(faces_input)
+                num_preds = faces_input.shape[0]
+            if self.meta.with_persons_model and person_input is not None:
+                all_person_input.append(person_input)
+            
+            outputs_info.append({
+                "detected_bboxes": detected_bboxes,
+                "faces_inds": faces_inds,
+                "bodies_inds": bodies_inds,
+                "num_preds": num_preds,
+            })
+
+        if not all_faces_input:
+            return
+
+        if self.meta.with_persons_model:
+            model_input = torch.cat([torch.cat((face, person), dim=1) for face, person in zip(all_faces_input, all_person_input)])
+        else:
+            model_input = torch.cat(all_faces_input)
+            
+        if model_input.numel() == 0:
+            return
+
+        output = self.inference(model_input)
+
+        start_idx = 0
+        for info in outputs_info:
+            if info is None:
+                continue
+            
+            output_slice = output[start_idx : start_idx + info["num_preds"]]
+            self.fill_in_results(output_slice, info["detected_bboxes"], info["faces_inds"], info["bodies_inds"])
+            start_idx += info["num_preds"]
 
     def fill_in_results(self, output, detected_bboxes, faces_inds, bodies_inds):
         if self.meta.only_age:

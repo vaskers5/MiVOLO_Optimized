@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -32,6 +32,16 @@ class Predictor:
             out_im = detected_objects.plot()
 
         return detected_objects, out_im
+
+    def recognize_batched(self, images: List[np.ndarray]) -> Tuple[List[PersonAndFaceResult], Optional[List[np.ndarray]]]:
+        detected_objects_list: List[PersonAndFaceResult] = self.detector.predict_batched(images)
+        self.age_gender_model.predict_batched(images, detected_objects_list)
+
+        out_ims = None
+        if self.draw:
+            out_ims = [detected_objects.plot() for detected_objects in detected_objects_list]
+
+        return detected_objects_list, out_ims
 
     def recognize_video(self, source: str) -> Generator:
         video_capture = cv2.VideoCapture(source)
