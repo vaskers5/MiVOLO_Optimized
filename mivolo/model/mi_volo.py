@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -173,9 +173,9 @@ class MiVOLO:
         self.fill_in_results(output, detected_bboxes, faces_inds, bodies_inds)
 
     def predict_batched(self, images: List[np.ndarray], detected_bboxes_list: List[PersonAndFaceResult]):
-        all_faces_input = []
-        all_person_input = []
-        outputs_info = []
+        all_faces_input: List[torch.Tensor] = []
+        all_person_input: List[torch.Tensor] = []
+        outputs_info: List[Optional[Dict[str, Any]]] = []
 
         for i, (image, detected_bboxes) in enumerate(zip(images, detected_bboxes_list)):
             if (
@@ -191,29 +191,33 @@ class MiVOLO:
             if faces_input is None and person_input is None:
                 outputs_info.append(None)
                 continue
-            
+
             num_preds = 0
             if faces_input is not None:
                 all_faces_input.append(faces_input)
                 num_preds = faces_input.shape[0]
             if self.meta.with_persons_model and person_input is not None:
                 all_person_input.append(person_input)
-            
-            outputs_info.append({
-                "detected_bboxes": detected_bboxes,
-                "faces_inds": faces_inds,
-                "bodies_inds": bodies_inds,
-                "num_preds": num_preds,
-            })
+
+            outputs_info.append(
+                {
+                    "detected_bboxes": detected_bboxes,
+                    "faces_inds": faces_inds,
+                    "bodies_inds": bodies_inds,
+                    "num_preds": num_preds,
+                }
+            )
 
         if not all_faces_input:
             return
 
+        faces_tensor = torch.cat(all_faces_input)
         if self.meta.with_persons_model:
-            model_input = torch.cat([torch.cat((face, person), dim=1) for face, person in zip(all_faces_input, all_person_input)])
+            person_tensor = torch.cat(all_person_input)
+            model_input = torch.cat((faces_tensor, person_tensor), dim=1)
         else:
-            model_input = torch.cat(all_faces_input)
-            
+            model_input = faces_tensor
+
         if model_input.numel() == 0:
             return
 
@@ -223,39 +227,32 @@ class MiVOLO:
         for info in outputs_info:
             if info is None:
                 continue
-            
+
             output_slice = output[start_idx : start_idx + info["num_preds"]]
             self.fill_in_results(output_slice, info["detected_bboxes"], info["faces_inds"], info["bodies_inds"])
             start_idx += info["num_preds"]
 
     def fill_in_results(self, output, detected_bboxes, faces_inds, bodies_inds):
         if self.meta.only_age:
-            age_output = output
-            gender_probs, gender_indx = None, None
+            age_tensor = output.view(-1)
+            gender_probs = gender_indx = None
         else:
-            age_output = output[:, 2]
-            gender_output = output[:, :2].softmax(-1)
-            gender_probs, gender_indx = gender_output.topk(1)
+            age_tensor = output[:, 2]
+            gender_probs, gender_indx = output[:, :2].softmax(-1).max(dim=-1)
+
+        ages = (age_tensor * (self.meta.max_age - self.meta.min_age) + self.meta.avg_age).round(2)
 
         assert output.shape[0] == len(faces_inds) == len(bodies_inds)
 
-        # per face
-        for index in range(output.shape[0]):
-            face_ind = faces_inds[index]
-            body_ind = bodies_inds[index]
+        for index, (face_ind, body_ind, age) in enumerate(zip(faces_inds, bodies_inds, ages)):
+            detected_bboxes.set_age(face_ind, age.item())
+            detected_bboxes.set_age(body_ind, age.item())
 
-            # get_age
-            age = age_output[index].item()
-            age = age * (self.meta.max_age - self.meta.min_age) + self.meta.avg_age
-            age = round(age, 2)
-
-            detected_bboxes.set_age(face_ind, age)
-            detected_bboxes.set_age(body_ind, age)
-
-            _logger.info(f"\tage: {age}")
+            _logger.info(f"\tage: {age.item()}")
 
             if gender_probs is not None:
-                gender = "male" if gender_indx[index].item() == 0 else "female"
+                gender_id = gender_indx[index].item()
+                gender = "male" if gender_id == 0 else "female"
                 gender_score = gender_probs[index].item()
 
                 _logger.info(f"\tgender: {gender} [{int(gender_score * 100)}%]")
