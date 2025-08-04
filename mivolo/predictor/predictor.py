@@ -36,7 +36,7 @@ class Predictor:
         detected_objects: PersonAndFaceResult = self.detector.predict(image)
 
         # Apply enhanced face-person association
-        detected_objects = self.apply_enhanced_face_person_association(detected_objects)
+        detected_objects = self.associate_faces(detected_objects)
 
         self.age_gender_model.predict(image, detected_objects)
 
@@ -54,8 +54,8 @@ class Predictor:
         detected_objects_list: List[PersonAndFaceResult] = self.detector.predict_batched(images)
 
         # Apply enhanced face-person association to each result
-        detected_objects_list = [self.apply_enhanced_face_person_association(detected_objects)
-                               for detected_objects in detected_objects_list]
+        detected_objects_list = [self.associate_faces(detected_objects)
+                                for detected_objects in detected_objects_list]
 
         self.age_gender_model.predict_batched(images, detected_objects_list)
 
@@ -81,8 +81,8 @@ class Predictor:
         detected_objects_list: List[PersonAndFaceResult] = self.detector.track_batched(processed_frames)
 
         # Apply enhanced face-person association to each result
-        detected_objects_list = [self.apply_enhanced_face_person_association(detected_objects)
-                               for detected_objects in detected_objects_list]
+        detected_objects_list = [self.associate_faces(detected_objects)
+                                for detected_objects in detected_objects_list]
 
         self.age_gender_model.predict_batched(processed_frames, detected_objects_list)
 
@@ -160,49 +160,43 @@ class Predictor:
 
         return aggregated_results
 
-    def apply_enhanced_face_person_association(self, detected_objects: PersonAndFaceResult,
-                                             nms_iou_threshold: float = 0.5,
-                                             association_iou_threshold: float = 0.3) -> PersonAndFaceResult:
-        """
-        Apply enhanced face-person association using NMS and improved matching algorithms.
-
-        Args:
-            detected_objects: PersonAndFaceResult object with detected faces and persons
-            nms_iou_threshold: IoU threshold for NMS to remove overlapping detections
-            association_iou_threshold: IoU threshold for associating faces with persons
-
-        Returns:
-            PersonAndFaceResult: Updated object with improved associations
-        """
+    def associate_faces(
+        self,
+        detections: PersonAndFaceResult,
+        nms_iou_threshold: float = 0.5,
+        association_iou_threshold: float = 0.3,
+    ) -> PersonAndFaceResult:
+        """Associate detected faces with persons using NMS and matching heuristics."""
         try:
             # First apply the original association as baseline
-            detected_objects.associate_faces_with_persons()
+            detections.associate_faces_with_persons()
 
             # Then apply enhanced methods if possible
             # First apply NMS to reduce overlapping detections
-            detected_objects = self._apply_nms_filtering(detected_objects, nms_iou_threshold)
+            detections = self._apply_nms_filtering(detections, nms_iou_threshold)
 
             # Then apply enhanced face-person association
-            detected_objects = self._enhanced_face_person_association(detected_objects, association_iou_threshold)
+            detections = self._enhanced_face_person_association(detections, association_iou_threshold)
 
         except Exception as e:
             # Fallback to original method if enhanced methods fail
             # print(f"Enhanced association failed, falling back to original method: {e}")
-            detected_objects.associate_faces_with_persons()
+            detections.associate_faces_with_persons()
 
-        return detected_objects
+        return detections
 
-    def _apply_nms_filtering(self, detected_objects: PersonAndFaceResult, iou_threshold: float) -> PersonAndFaceResult:
-        """
-        Apply Non-Maximum Suppression to remove overlapping detections of the same class.
-        """
-        boxes = detected_objects.yolo_results.boxes
+    # Backwards compatibility alias
+    apply_enhanced_face_person_association = associate_faces
+
+    def _apply_nms_filtering(self, detections: PersonAndFaceResult, iou_threshold: float) -> PersonAndFaceResult:
+        """Apply Non-Maximum Suppression to remove overlapping detections of the same class."""
+        boxes = detections.yolo_results.boxes
         if len(boxes) == 0:
-            return detected_objects
+            return detections
 
         # Separate faces and persons
-        face_indices = detected_objects.get_bboxes_inds("face")
-        person_indices = detected_objects.get_bboxes_inds("person")
+        face_indices = detections.get_bboxes_inds("face")
+        person_indices = detections.get_bboxes_inds("person")
 
         # Apply NMS separately for faces and persons
         face_keep_indices = self._apply_nms_to_category(boxes, face_indices, iou_threshold)
@@ -213,9 +207,9 @@ class Predictor:
 
         # Filter the results to keep only non-suppressed detections
         if len(all_keep_indices) < len(boxes):
-            detected_objects = self._filter_detections(detected_objects, all_keep_indices)
+            detections = self._filter_detections(detections, all_keep_indices)
 
-        return detected_objects
+        return detections
 
     def _apply_nms_to_category(self, boxes, category_indices: List[int], iou_threshold: float) -> List[int]:
         """Apply NMS to a specific category of detections."""
@@ -259,7 +253,7 @@ class Predictor:
         person_boxes = [detected_objects.get_bbox_by_ind(i) for i in person_indices]
 
         # Calculate multiple matching criteria
-        iou_matrix = self._calculate_enhanced_matching_matrix(face_boxes, person_boxes, detected_objects)
+        iou_matrix = self._build_matching_matrix(face_boxes, person_boxes, detected_objects)
 
         # Apply Hungarian algorithm for optimal assignment
         face_assignments, person_assignments = linear_sum_assignment(iou_matrix, maximize=True)
@@ -279,52 +273,39 @@ class Predictor:
 
         return detected_objects
 
-    def _calculate_enhanced_matching_matrix(self, face_boxes: List[torch.Tensor],
-                                          person_boxes: List[torch.Tensor],
-                                          detected_objects: PersonAndFaceResult) -> np.ndarray:
-        """
-        Calculate enhanced matching matrix considering multiple factors.
-        """
-        n_faces = len(face_boxes)
-        n_persons = len(person_boxes)
-
+    def _build_matching_matrix(
+        self,
+        face_boxes: List[torch.Tensor],
+        person_boxes: List[torch.Tensor],
+        detections: PersonAndFaceResult,
+    ) -> np.ndarray:
+        """Vectorized computation of matching scores for faces and persons."""
+        n_faces, n_persons = len(face_boxes), len(person_boxes)
         if n_faces == 0 or n_persons == 0:
             return np.zeros((n_faces, n_persons))
 
+        faces = torch.stack(face_boxes).cpu()
+        persons = torch.stack(person_boxes).cpu()
+
         # IoU matrix
-        iou_matrix = box_iou(torch.stack(person_boxes).cpu(), torch.stack(face_boxes).cpu(), over_second=True).cpu().numpy().T
+        iou = box_iou(persons, faces, over_second=True).cpu().numpy().T
 
-        # Distance matrix (normalized by image size)
-        img_height, img_width = detected_objects.yolo_results.orig_img.shape[:2]
-        distance_matrix = np.zeros((n_faces, n_persons))
-
-        for i, face_box in enumerate(face_boxes):
-            face_center = [(face_box[0] + face_box[2]) / 2, (face_box[1] + face_box[3]) / 2]
-            for j, person_box in enumerate(person_boxes):
-                person_center = [(person_box[0] + person_box[2]) / 2, (person_box[1] + person_box[3]) / 2]
-
-                # Normalized distance
-                distance = np.sqrt((face_center[0] - person_center[0])**2 + (face_center[1] - person_center[1])**2)
-                normalized_distance = distance / np.sqrt(img_width**2 + img_height**2)
-                distance_matrix[i, j] = 1.0 / (1.0 + normalized_distance)  # Inverse distance score
+        # Distance matrix (normalized by image diagonal)
+        img_h, img_w = detections.yolo_results.orig_img.shape[:2]
+        norm = float(np.hypot(img_w, img_h))
+        face_centers = (faces[:, :2] + faces[:, 2:]) / 2
+        person_centers = (persons[:, :2] + persons[:, 2:]) / 2
+        dists = torch.cdist(face_centers, person_centers) / norm
+        distance = (1.0 / (1.0 + dists)).numpy()
 
         # Size consistency matrix
-        size_matrix = np.zeros((n_faces, n_persons))
-        for i, face_box in enumerate(face_boxes):
-            face_area = (face_box[2] - face_box[0]) * (face_box[3] - face_box[1])
-            for j, person_box in enumerate(person_boxes):
-                person_area = (person_box[2] - person_box[0]) * (person_box[3] - person_box[1])
+        face_area = (faces[:, 2] - faces[:, 0]) * (faces[:, 3] - faces[:, 1])
+        person_area = (persons[:, 2] - persons[:, 0]) * (persons[:, 3] - persons[:, 1])
+        area_ratio = face_area[:, None] / (person_area[None, :] + 1e-6)
+        expected_ratio = 0.1
+        size = (1.0 / (1.0 + (area_ratio - expected_ratio).abs() / expected_ratio)).numpy()
 
-                # Expected face-to-person area ratio (faces are typically 1/10 to 1/5 of person area)
-                area_ratio = face_area / (person_area + 1e-6)
-                expected_ratio = 0.1  # Typical face-to-person area ratio
-                size_consistency = 1.0 / (1.0 + abs(area_ratio - expected_ratio) / expected_ratio)
-                size_matrix[i, j] = size_consistency
-
-        # Combined score with weights
-        combined_matrix = (0.6 * iou_matrix + 0.25 * distance_matrix + 0.15 * size_matrix)
-
-        return combined_matrix
+        return 0.6 * iou + 0.25 * distance + 0.15 * size
 
     def _convert_to_detected_persons(self, detected_objects: PersonAndFaceResult) -> List[DetectedPerson]:
         """
