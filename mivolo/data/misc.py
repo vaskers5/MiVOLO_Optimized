@@ -10,24 +10,25 @@ import torchvision.transforms.functional as F
 from scipy.optimize import linear_sum_assignment
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
+
 CROP_ROUND_RATE = 0.1
 MIN_PERSON_CROP_NONZERO = 0.5
 
 
-def aggregate_votes_winsorized(ages, max_age_dist=6):
-    # Replace any annotation that is more than a max_age_dist away from the median
-    # with the median + max_age_dist if higher or max_age_dist - max_age_dist if below
+def aggregate_votes_winsorized(ages: List[float], max_age_dist: int = 6) -> float:
+    """Compute a winsorized mean of ages to reduce outlier influence."""
     median = np.median(ages)
     ages = np.clip(ages, median - max_age_dist, median + max_age_dist)
-    return np.mean(ages)
+    return float(np.mean(ages))
 
 
-def natural_key(string_):
-    """See http://www.codinghorror.com/blog/archives/001018.html"""
+def natural_key(string_: str) -> List[Union[int, str]]:
+    """Split strings into list of ints and strs for natural sorting."""
     return [int(s) if s.isdigit() else s for s in re.split(r"(\d+)", string_.lower())]
 
 
-def add_bool_arg(parser, name, default=False, help=""):
+def add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool = False, help: str = "") -> None:
+    """Add paired ``--name`` and ``--no-name`` boolean arguments to ``parser``."""
     dest_name = name.replace("-", "_")
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("--" + name, dest=dest_name, action="store_true", help=help)
