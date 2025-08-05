@@ -3,13 +3,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from scipy.optimize import linear_sum_assignment
-from torchvision.ops import nms
-
 from mivolo.data.misc import box_iou
 from mivolo.model.mi_volo import MiVOLO
 from mivolo.model.yolo_detector import Detector
 from mivolo.structures import AGE_GENDER_TYPE, PersonAndFaceResult
+from scipy.optimize import linear_sum_assignment
+from torchvision.ops import nms
 
 from .detected_person import DetectedPerson
 from .gender_enum import GenderEnum
@@ -50,18 +49,20 @@ class Predictor:
 
         return detected_persons, detected_objects, out_im
 
-    def recognize_batched(self, images: List[np.ndarray]) -> Tuple[List[List[DetectedPerson]], List[PersonAndFaceResult], Optional[List[np.ndarray]]]:
+    def recognize_batched(
+        self, images: List[np.ndarray]
+    ) -> Tuple[List[List[DetectedPerson]], List[PersonAndFaceResult], Optional[List[np.ndarray]]]:
         detected_objects_list: List[PersonAndFaceResult] = self.detector.predict_batched(images)
 
         # Apply enhanced face-person association to each result
-        detected_objects_list = [self.associate_faces(detected_objects)
-                                for detected_objects in detected_objects_list]
+        detected_objects_list = [self.associate_faces(detected_objects) for detected_objects in detected_objects_list]
 
         self.age_gender_model.predict_batched(images, detected_objects_list)
 
         # Convert to DetectedPerson objects for each image
-        detected_persons_list = [self._convert_to_detected_persons(detected_objects)
-                               for detected_objects in detected_objects_list]
+        detected_persons_list = [
+            self._convert_to_detected_persons(detected_objects) for detected_objects in detected_objects_list
+        ]
 
         out_ims = None
         if self.draw:
@@ -69,8 +70,7 @@ class Predictor:
 
         return detected_persons_list, detected_objects_list, out_ims
 
-    def recognize_video(
-        self, frames: List[np.ndarray], every_n_frame: int = 1) -> RecognizedVideo:
+    def recognize_video(self, frames: List[np.ndarray], every_n_frame: int = 1) -> RecognizedVideo:
         if every_n_frame <= 0:
             raise ValueError("every_n_frame must be a positive integer")
 
@@ -81,8 +81,7 @@ class Predictor:
         detected_objects_list: List[PersonAndFaceResult] = self.detector.track_batched(processed_frames)
 
         # Apply enhanced face-person association to each result
-        detected_objects_list = [self.associate_faces(detected_objects)
-                                for detected_objects in detected_objects_list]
+        detected_objects_list = [self.associate_faces(detected_objects) for detected_objects in detected_objects_list]
 
         self.age_gender_model.predict_batched(processed_frames, detected_objects_list)
 
@@ -228,13 +227,53 @@ class Predictor:
 
     def _filter_detections(self, detected_objects: PersonAndFaceResult, keep_indices: List[int]) -> PersonAndFaceResult:
         """Filter detections to keep only specified indices."""
-        # This is a simplified version - in practice, you'd need to create a new Results object
-        # with filtered detections. For now, we'll work with the existing structure.
-        # In a full implementation, you'd reconstruct the ultralytics Results object
+
+        # Nothing to filter
+        if not keep_indices or len(keep_indices) == detected_objects.n_objects:
+            return detected_objects
+
+        # Mapping from old index to new index after filtering
+        index_map = {old: new for new, old in enumerate(keep_indices)}
+
+        yolo_res = detected_objects.yolo_results
+
+        # Filter YOLO result tensors if they exist
+        if yolo_res.boxes is not None:
+            yolo_res.boxes = yolo_res.boxes[keep_indices]
+        if getattr(yolo_res, "masks", None) is not None:
+            yolo_res.masks = yolo_res.masks[keep_indices]
+        if getattr(yolo_res, "probs", None) is not None:
+            yolo_res.probs = yolo_res.probs[keep_indices]
+        if getattr(yolo_res, "keypoints", None) is not None:
+            yolo_res.keypoints = yolo_res.keypoints[keep_indices]
+        if getattr(yolo_res, "obb", None) is not None:
+            yolo_res.obb = yolo_res.obb[keep_indices]
+
+        # Filter age and gender predictions to match new boxes
+        detected_objects.ages = [detected_objects.ages[i] for i in keep_indices]
+        detected_objects.genders = [detected_objects.genders[i] for i in keep_indices]
+        detected_objects.gender_scores = [detected_objects.gender_scores[i] for i in keep_indices]
+
+        # Remap face-to-person associations using new indices
+        new_face_to_person_map: Dict[int, Optional[int]] = {}
+        for face_old, person_old in detected_objects.face_to_person_map.items():
+            if face_old not in index_map:
+                continue
+            face_new = index_map[face_old]
+            person_new = index_map.get(person_old) if person_old is not None else None
+            new_face_to_person_map[face_new] = person_new
+        detected_objects.face_to_person_map = new_face_to_person_map
+
+        # Update unassigned persons list
+        detected_objects.unassigned_persons_inds = [
+            index_map[idx] for idx in detected_objects.unassigned_persons_inds if idx in index_map
+        ]
+
         return detected_objects
 
-    def _enhanced_face_person_association(self, detected_objects: PersonAndFaceResult,
-                                        iou_threshold: float) -> PersonAndFaceResult:
+    def _enhanced_face_person_association(
+        self, detected_objects: PersonAndFaceResult, iou_threshold: float
+    ) -> PersonAndFaceResult:
         """
         Enhanced face-person association using multiple criteria:
         1. IoU overlap
@@ -332,7 +371,9 @@ class Predictor:
 
             # Get age and gender
             age = detected_objects.ages[face_ind] if detected_objects.ages[face_ind] is not None else 0
-            gender_str = detected_objects.genders[face_ind] if detected_objects.genders[face_ind] is not None else "male"
+            gender_str = (
+                detected_objects.genders[face_ind] if detected_objects.genders[face_ind] is not None else "male"
+            )
             gender = GenderEnum.FEMALE if gender_str == "female" else GenderEnum.MALE
 
             # Get VIT confidence (gender score)
@@ -345,7 +386,7 @@ class Predictor:
                 face_confidence=face_conf,
                 body_bbox=body_bbox,
                 body_confidence=body_conf,
-                vit_confidence=vit_conf
+                vit_confidence=vit_conf,
             )
             detected_persons.append(detected_person)
 
@@ -356,7 +397,9 @@ class Predictor:
 
             # Get age and gender for person
             age = detected_objects.ages[person_ind] if detected_objects.ages[person_ind] is not None else 0
-            gender_str = detected_objects.genders[person_ind] if detected_objects.genders[person_ind] is not None else "male"
+            gender_str = (
+                detected_objects.genders[person_ind] if detected_objects.genders[person_ind] is not None else "male"
+            )
             gender = GenderEnum.FEMALE if gender_str == "female" else GenderEnum.MALE
 
             # Get VIT confidence (gender score)
@@ -369,7 +412,7 @@ class Predictor:
                 face_confidence=None,
                 body_bbox=body_bbox,
                 body_confidence=body_conf,
-                vit_confidence=vit_conf
+                vit_confidence=vit_conf,
             )
             detected_persons.append(detected_person)
 
