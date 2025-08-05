@@ -1,10 +1,10 @@
 import os
-from typing import Dict, Union, List
+from typing import Dict, List, Union
 
 import numpy as np
-import PIL
 import torch
 from mivolo.structures import PersonAndFaceResult
+from PIL import Image
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
 
@@ -37,18 +37,18 @@ class Detector:
         self.detector_kwargs = {"conf": conf_thresh, "iou": iou_thresh, "half": self.half, "verbose": verbose}
         # self.yolo.predict(**self.detector_kwargs)
 
-    def predict(self, image: Union[np.ndarray, str, "PIL.Image"]) -> PersonAndFaceResult:
+    def predict(self, image: Union[np.ndarray, str, Image.Image]) -> PersonAndFaceResult:
         results: Results = self.yolo.predict(image, **self.detector_kwargs)[0]
         return PersonAndFaceResult(results)
 
-    def predict_batched(self, images: List[Union[np.ndarray, str, "PIL.Image"]]) -> List[PersonAndFaceResult]:
+    def predict_batched(self, images: List[Union[np.ndarray, str, Image.Image]]) -> List[PersonAndFaceResult]:
         results_list: List[Results] = self.yolo.predict(images, **self.detector_kwargs)
         return [PersonAndFaceResult(results) for results in results_list]
 
-    def track(self, image: Union[np.ndarray, str, "PIL.Image"]) -> PersonAndFaceResult:
+    def track(self, image: Union[np.ndarray, str, Image.Image]) -> PersonAndFaceResult:
         results: Results = self.yolo.track(image, persist=True, **self.detector_kwargs)[0]
         return PersonAndFaceResult(results)
 
-    def track_batched(self, images: List[Union[np.ndarray, str, "PIL.Image"]]) -> List[PersonAndFaceResult]:
+    def track_batched(self, images: List[Union[np.ndarray, str, Image.Image]]) -> List[PersonAndFaceResult]:
         results_list: List[Results] = self.yolo.track(images, persist=True, **self.detector_kwargs)
         return [PersonAndFaceResult(results) for results in results_list]
